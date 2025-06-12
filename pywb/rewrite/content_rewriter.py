@@ -354,6 +354,9 @@ class StreamingRewriter(object):
 
             decoder = codecs.getincrementaldecoder(charset)()
 
+            # Since we don't know which type of rewrite to perform until we read the full text,
+            # The streaming method has to read the entire stream first.
+            total_buff = ''
             while True:
                 buff = stream.read(BUFF_SIZE)
                 if not buff:
@@ -370,10 +373,11 @@ class StreamingRewriter(object):
                         charset = rwinfo.charset
                         decoder = codecs.getincrementaldecoder(charset)()
                         buff = decoder.decode(buff)
+                total_buff += buff
 
-                buff = self.rewrite(buff)
+            total_buff = self.rewrite(total_buff)
 
-                yield buff.encode(charset)
+            yield total_buff.encode(charset)
 
             # For adding a tail/handling final buffer
             buff = self.final_read()
@@ -434,6 +438,7 @@ class RewriteInfo(object):
 
         text_type = self._resolve_text_type(orig_text_type)
         url = self.url_rewriter.wburl.url
+        mod = self.url_rewriter.wburl.mod
 
         if text_type in ('guess-text', 'guess-bin', 'guess-html'):
             text_type = None
@@ -442,6 +447,8 @@ class RewriteInfo(object):
             # determine if url contains strings that indicate jsonp
             if any(jsonp_string in url for jsonp_string in self.JSONP_CONTAINS):
                 text_type = 'json'
+            if mod == 'esm_':
+                text_type = 'js-esm'
 
         if (text_type and orig_text_type != text_type) or text_type == 'html':
             if url.endswith('.json'):

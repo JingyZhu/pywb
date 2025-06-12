@@ -1,4 +1,6 @@
 import re
+import os
+import json
 from pywb.rewrite.content_rewriter import StreamingRewriter
 from pywb.utils.loaders import load_py_name
 from six.moves.urllib.parse import unquote
@@ -28,6 +30,16 @@ class RxRules(object):
 
         return do_replace
 
+    @staticmethod
+    def replace_import(src, target):
+        def do_replace(x, url_rewriter):
+            res = x.replace(src, target)
+            if url_rewriter.rewrite_opts.get('is_module'):
+                res += 'import.meta.url, '
+            else:
+                res += 'null, '
+            return res
+        return do_replace
 
     @staticmethod
     def format(template):
@@ -109,9 +121,10 @@ if (!self.__WB_pmw) {{ self.__WB_pmw = function(obj) {{ this.__WB_source = obj; 
             'frames',
             'opener'
         ]
+        self.local_objs.append('globalThis')
 
         local_declares = '\n'.join([local_var_line.format(obj, local_init_func_name) for obj in self.local_objs])
-        local_declares += "\nlet arguments;"
+        # local_declares += "\nlet arguments;"
 
         prop_str = '|'.join(self.local_objs)
 
@@ -131,7 +144,13 @@ if (!self.__WB_pmw) {{ self.__WB_pmw = function(obj) {{ this.__WB_source = obj; 
             # rewrite ')(this)'
             ('\}(?:\s*\))?\s*\(this\)', self.replace_str(this_rw), 0),
             # rewrite this in && or || expr?
-            (r'(?<=[^|&][|&]{2})\s*this\b\s*(?![|&.$]([^|&]|$))', self.replace_str(this_rw), 0),
+            (r'(?<=[^|&][|&]{2})\s*this\b\s*(?![|&.$](?:[^|&]|$))', self.replace_str(this_rw), 0),
+
+            # ignore 'async import', custom function
+            (r"async\s+import\s*\(", lambda x, _: x, 0),
+            (r"[^$.]\bimport\s*\([^)]*\)\s*\{", lambda x, _: x, 0),
+            # esm dynamic import, if found, mark as module
+            (r"[^$.]\bimport\s*\(", self.replace_import("import", "____wb_rewrite_import__"), 0),
         ]
 
         super(JSWombatProxyRules, self).__init__(rules)
@@ -274,9 +293,24 @@ class JSWombatProxyRewriter(RegexRewriter):
     def __init__(self, rewriter, extra_rules=None):
         super(JSWombatProxyRewriter, self).__init__(rewriter, extra_rules=extra_rules)
 
-        self.first_buff = self.rules_factory.first_buff
-        self.last_buff = self.rules_factory.last_buff
+        self.first_buff = ''
+        self.last_buff = ''
         self.local_objs = self.rules_factory.local_objs
+
+    def detect_is_module(self, text):
+        IMPORT_RX = r"^\s*?import\s*?[{\"'\*]"
+        EXPORT_RX = r"^\s*?export\s*?({\s*?([\s\w,$\n]+?)\s*}[\s;]*|default|class)\s*"
+        if 'import' in text and re.findall(IMPORT_RX, text):
+            return True
+        if 'export' in text and re.findall(EXPORT_RX, text, re.M):
+            return True
+        return False
+    
+    def get_module_decl(self, local_decls):
+        return f'import {{ {", ".join(local_decls)} }} from "/static/wb_module_decl.js";\n'
+
+    def rewrite(self, string, **kwargs):
+        return self.rewrite_common(string, **kwargs)
 
     def rewrite_complete(self, string, **kwargs):
         if not kwargs.get('inline_attr'):
@@ -287,19 +321,74 @@ class JSWombatProxyRewriter(RegexRewriter):
         if not any(obj in string for obj in self.local_objs):
             return string
 
+        return self.rewrite_common(string, **kwargs)
+
+    def rewrite_common(self, string, **kwargs):
+        is_module = kwargs.get('is_module', False) or self.detect_is_module(string)
+        self.url_rewriter.rewrite_opts['is_module'] = is_module
+
         if string.startswith('javascript:'):
-            string = 'javascript:' + self.first_buff + self.rewrite(string[len('javascript:'):])
+            # Call the parent class's rewrite method to avoid recursion
+            string = 'javascript:' + self.first_read(string) + super(JSWombatProxyRewriter, self).rewrite(string[len('javascript:'):])
         else:
-            string = self.first_buff + self.rewrite(string)
+            string = super(JSWombatProxyRewriter, self).rewrite(string)
+            if is_module:
+                return self.get_module_decl(self.local_objs) + string
+            string = self.first_read(string) + string
 
-        string += self.last_buff
+        string += self.last_read(string)
 
-        string = string.replace('\n', '')
+        # string = string.replace('\n', '')
 
         return string
 
+    def rewrite_importmap(self, string):
+        try:
+            root = json.loads(string)
+            def rewrite_url(text):
+                return self.url_rewriter.rewrite(text, mod='esm_')
+            output = {'imports': {}}
+            for key, value in root.get('imports', {}).items():
+                output['imports'][rewrite_url(key)] = rewrite_url(value)
+            if 'scopes' in root:
+                output['scopes'] = {}
+                for scope_key, scope_value in root['scopes'].items():
+                    new_scope = {}
+                    for key, value in scope_value.items():
+                        new_scope[rewrite_url(key)] = rewrite_url(value)
+                    output['scopes'][scope_key] = new_scope
+            return json.dumps(output, indent=2)
+        except:
+            return string
+
+
+    def first_read(self, string=''):
+        return self.rules_factory.first_buff
+
+    def last_read(self, string=''):
+        is_module = self.detect_is_module(string)
+        if is_module:
+            return ''
+        else:
+            return self.rules_factory.last_buff
+
     def final_read(self):
-        return self.last_buff
+        return ''
+
+# =================================================================
+class JSWombatProxyESMRewriter(JSWombatProxyRewriter):
+    """
+    ESM version of JSWombatProxyESMRewriter. Used for JS modules 
+    """
+    def rewrite(self, string, **kwargs):
+        kwargs['is_module'] = True
+        kwargs['inline_attr'] = True
+        return super(JSWombatProxyESMRewriter, self).rewrite(string, **kwargs)
+
+    def rewrite_complete(self, string, **kwargs):
+        kwargs['is_module'] = True
+        kwargs['inline_attr'] = True
+        return super(JSWombatProxyESMRewriter, self).rewrite_complete(string, **kwargs)
 
 
 # =================================================================

@@ -313,6 +313,19 @@ class HTMLRewriterMixin(StreamingRewriter):
             content = self.ADD_WINDOW.sub('window.\\1', content)
 
         return content
+    
+    def _rewrite_script_importmap(self, script_content):
+        if not script_content:
+            return ''
+
+        if not hasattr(self.js_rewriter, 'rewrite_importmap'):
+            return script_content
+
+        # importmap is a special case, where we rewrite the entire content
+        # as a single string, so that it can be parsed by the browser
+        content = self.js_rewriter.rewrite_importmap(script_content)
+
+        return content
 
     def has_attr(self, tag_attrs, attr):
         name, value = attr
@@ -361,6 +374,12 @@ class HTMLRewriterMixin(StreamingRewriter):
             handler = {}
 
         self.out.write('<' + tag)
+
+        # Get attr 'type' first, so script src can be rewritten accordingly
+        attr_type = None
+        for attr_name, attr_value in tag_attrs:
+            if attr_name.lower() == 'type':
+                attr_type = attr_value.lower()
 
         for attr_name, attr_value in tag_attrs:
             empty_attr = False
@@ -426,7 +445,8 @@ class HTMLRewriterMixin(StreamingRewriter):
                 attr_value = self._rewrite_url(attr_value, rw_mod)
 
             elif tag == 'script' and attr_name == 'src':
-                rw_mod = handler.get(attr_name)
+                # if module script, use esm_ module rewriter
+                rw_mod = 'esm_' if attr_type == 'module' else handler.get(attr_name)
                 ov = attr_value
                 attr_value = self._rewrite_url(attr_value, rw_mod)
                 if attr_value == ov and not ov.startswith(self.url_rewriter.NO_REWRITE_URI_PREFIX):
@@ -484,8 +504,11 @@ class HTMLRewriterMixin(StreamingRewriter):
                 self._wb_parse_context = 'style'
 
             elif tag == 'script':
+                script_type = self.get_attr(tag_attrs, 'type')
                 if self._allow_js_type(tag_attrs):
                     self._wb_parse_context = 'script'
+                elif script_type.lower() == 'importmap':
+                    self._wb_parse_context = 'script_importmap'
 
     def _allow_js_type(self, tag_attrs):
         type_value = self.get_attr(tag_attrs, 'type')
@@ -539,6 +562,8 @@ class HTMLRewriterMixin(StreamingRewriter):
     def parse_data(self, data):
         if self._wb_parse_context == 'script':
             data = self._rewrite_script(data)
+        elif self._wb_parse_context == 'script_importmap':
+            data = self._rewrite_script_importmap(data)
         elif self._wb_parse_context == 'style':
             data = self._rewrite_css(data)
 
