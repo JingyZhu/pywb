@@ -7542,7 +7542,7 @@
           return win._wb_wombat != null;
         } else {
           // otherwise, ensure that it is not a top container frame
-          return win.wbinfo.is_framed;
+          return win.wbinfo.is_framed === null || win.wbinfo.is_framed;
         }
       } catch (e) {
         return false;

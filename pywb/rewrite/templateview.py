@@ -362,7 +362,7 @@ class HeadInsertView(BaseInsertView):
         params['wb_url'] = wb_url
         params['top_url'] = top_url
         params['coll'] = coll
-        params['is_framed'] = is_framed
+        params['is_framed'] = is_framed or None
 
         def make_head_insert(rule, cdx):
             params['wombat_ts'] = cdx['timestamp'] if include_ts else ''
