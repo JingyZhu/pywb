@@ -1,5 +1,6 @@
 import re
 import os
+import esprima
 import json
 from pywb.rewrite.content_rewriter import StreamingRewriter
 from pywb.utils.loaders import load_py_name
@@ -309,6 +310,61 @@ class JSWombatProxyRewriter(RegexRewriter):
     def get_module_decl(self, local_decls):
         return f'import {{ {", ".join(local_decls)} }} from "/static/wb_module_decl.js";\n'
 
+    def global_rewrite(self, string):
+        """Due to local scoping after rewriting, 
+        rewrite variables declaration to ensure they are still global.
+        """
+        replacements = []
+        global_vars= set()
+
+        try:
+            # Parse the script into an AST. 'range' gives us character indexes.
+            ast = esprima.parseScript(string, {'range': True, 'tolerant': True})
+
+            # Find all top-level 'let' and 'const' declarations to be replaced.
+            for node in ast.body:
+                start_index = node.range[0]
+                end_index = node.range[1]
+                # Handle 'let' and 'const' declarations
+                if node.type == 'VariableDeclaration' and node.kind in ('let', 'const'):
+                    keyword_length = len(node.kind)
+                    replacements.append({
+                        'start': start_index, 
+                        'end': start_index + keyword_length,
+                        'text': 'var'
+                    })
+                # Handle 'class' declarations
+                elif node.type == 'ClassDeclaration':
+                    # Transform 'class Foo' into 'var Foo = class'
+                    class_name = node.id.name
+                    keyword_length = 5
+                    replacements.append({
+                        'start': start_index,
+                        'end': start_index + keyword_length,
+                        'text': f'var {class_name} = class'
+                    })
+                    replacements.append({
+                        'start': end_index,
+                        'end': end_index,
+                    'text': ';'
+                    }) 
+        except Exception as e:
+            # print(f"Error parsing JavaScript: {e} \n on {string}", flush=True)
+            return string
+
+
+        # Rebuild the code string
+        last_index = 0
+        new_code_parts = []
+        for replacement in sorted(replacements, key=lambda x: x['start']):
+            new_code_parts.append(string[last_index:replacement['start']])
+            new_code_parts.append(replacement['text'])
+            last_index = replacement['end']
+        new_code_parts.append(string[last_index:])
+        rewritten_code = "".join(new_code_parts)
+        return rewritten_code
+    
+
     def rewrite(self, string, **kwargs):
         return self.rewrite_common(string, **kwargs)
 
@@ -331,10 +387,13 @@ class JSWombatProxyRewriter(RegexRewriter):
             # Call the parent class's rewrite method to avoid recursion
             string = 'javascript:' + self.first_read(string) + super(JSWombatProxyRewriter, self).rewrite(string[len('javascript:'):])
         else:
-            string = super(JSWombatProxyRewriter, self).rewrite(string)
             if is_module:
+                string = super(JSWombatProxyRewriter, self).rewrite(string)
                 return self.get_module_decl(self.local_objs) + string
-            string = self.first_read(string) + string
+            else:
+                string = self.global_rewrite(string)
+                string = super(JSWombatProxyRewriter, self).rewrite(string)
+                string = self.first_read(string) + string
 
         string += self.last_read(string)
 
