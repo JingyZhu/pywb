@@ -4238,6 +4238,18 @@
     this.defProp(obj, prop, setter, rewriteGetter ? getter : orig_getter);
   };
 
+  Wombat.prototype.addWBInsert = function(elem) {
+    if (typeof elem !== 'string') {
+      elem = elem.toString();
+    }
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(elem, 'text/html');
+    let wombatScript = doc.createElement('script');
+    wombatScript.src = this.wb_info.static_prefix + 'wombat.js';
+    doc.head.appendChild(wombatScript);
+    return doc.documentElement.outerHTML;
+  }
+
   Wombat.prototype.overrideHtmlAssignSrcDoc = function(elem, prop) {
     var obj = elem.prototype;
 
@@ -4248,12 +4260,15 @@
 
     var setter = function overrideSetter(orig) {
       this.__wb_srcdoc = orig;
-
+      if (this.hasAttribute('sandbox')) {
+        this.removeAttribute('sandbox');
+      }
       if (wombat.wb_info.isSW) {
         wombat.blobUrlForIframe(this, orig);
         return orig;
       } else {
-        return wombat.rewriteHTMLAssign(this, orig_setter, orig);
+        let rewritten = wombat.addWBInsert(orig);
+        return wombat.rewriteHTMLAssign(this, orig_setter, rewritten);
       }
     };
 
@@ -6190,7 +6205,7 @@
       return;
     }
 
-    var src = iframe.src;
+    var src = iframe.srcdoc ? '' : iframe.src;
     //var src = this.wb_getAttribute.call(iframe, 'src');
 
     this.initNewWindowWombat(win, src);
