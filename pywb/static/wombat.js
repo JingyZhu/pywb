@@ -5924,6 +5924,16 @@
           return rewriteFn(this, originalReplaceChild, newNode, oldNode);
         };
       }
+      if (Node.prototype.isSameNode) {
+        var originalIsSameNode = Node.prototype.isSameNode;
+        Node.prototype.isSameNode = function isSameNode(otherNode) {
+          let thisNode = wombat.proxyToObj(this); 
+          if (otherNode) {
+            otherNode = wombat.proxyToObj(otherNode);
+          }
+          return originalIsSameNode.call(thisNode, otherNode);
+        };
+      }
       this.overridePropToProxy(Node.prototype, 'ownerDocument');
       this.overridePropToProxy(
         this.$wbwindow.HTMLHtmlElement.prototype,
